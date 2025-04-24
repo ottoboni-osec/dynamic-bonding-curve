@@ -2,18 +2,27 @@ import { BN } from "bn.js";
 import { ProgramTestContext } from "solana-bankrun";
 import {
     BaseFee,
+    ClaimCreatorTradeFeeParams,
+    claimCreatorTradingFee,
+    claimProtocolFee,
+    ClaimTradeFeeParams,
+    claimTradingFee,
     ConfigParameters,
     createClaimFeeOperator,
     createConfig,
     CreateConfigParams,
     createPoolWithSplToken,
+    creatorWithdrawSurplus,
+    partnerWithdrawSurplus,
+    protocolWithdrawSurplus,
     swap,
     SwapParams,
 } from "./instructions";
 import { Pool, VirtualCurveProgram } from "./utils/types";
 import { Keypair, LAMPORTS_PER_SOL, PublicKey } from "@solana/web3.js";
-import { createDammV2Config, fundSol, getMint, startTest } from "./utils";
+import { fundSol, getMint, startTest } from "./utils";
 import {
+    createDammConfig,
     createVirtualCurveProgram,
     derivePoolAuthority,
     MAX_SQRT_PRICE,
@@ -22,11 +31,16 @@ import {
 } from "./utils";
 import { getVirtualPool } from "./utils/fetcher";
 import { NATIVE_MINT } from "@solana/spl-token";
+import {
+    createMeteoraMetadata,
+    lockLpForCreatorDamm,
+    lockLpForPartnerDamm,
+    MigrateMeteoraParams,
+    migrateToMeteoraDamm,
+} from "./instructions/meteoraMigration";
+import { assert, expect } from "chai";
 
-import { createMeteoraDammV2Metadata, MigrateMeteoraDammV2Params, migrateToDammV2 } from "./instructions/dammV2Migration";
-import { expect } from "chai";
-
-describe("Migrate to damm v2", () => {
+describe("Creator and Partner share trading fees and surplus", () => {
     let context: ProgramTestContext;
     let admin: Keypair;
     let operator: Keypair;
@@ -91,6 +105,7 @@ describe("Migrate to damm v2", () => {
                     liquidity: U64_MAX.shln(30 + i),
                 });
             }
+
         }
 
         const instructionParams: ConfigParameters = {
@@ -100,13 +115,13 @@ describe("Migrate to damm v2", () => {
             },
             activationType: 0,
             collectFeeMode: 0,
-            migrationOption: 1,
+            migrationOption: 0,
             tokenType: 0, // spl_token
             tokenDecimal: 6,
             migrationQuoteThreshold: new BN(LAMPORTS_PER_SOL * 5),
-            partnerLpPercentage: 20,
-            creatorLpPercentage: 20,
-            partnerLockedLpPercentage: 55,
+            partnerLpPercentage: 0,
+            creatorLpPercentage: 0,
+            partnerLockedLpPercentage: 95,
             creatorLockedLpPercentage: 5,
             sqrtStartPrice: MIN_SQRT_PRICE.shln(32),
             lockedVesting: {
@@ -118,7 +133,7 @@ describe("Migrate to damm v2", () => {
             },
             migrationFeeOption: 0,
             tokenSupply: null,
-            creatorTradingFeePercentage: 0,
+            creatorTradingFeePercentage: 50,
             padding0: [],
             padding: [],
             curve: curves,
@@ -135,8 +150,7 @@ describe("Migrate to damm v2", () => {
 
     it("Create spl pool from config", async () => {
         virtualPool = await createPoolWithSplToken(context.banksClient, program, {
-            poolCreator,
-            payer: operator,
+            payer: poolCreator,
             quoteMint: NATIVE_MINT,
             config,
             instructionParams: {
@@ -150,6 +164,13 @@ describe("Migrate to damm v2", () => {
             program,
             virtualPool
         );
+
+        // validate freeze authority
+        const baseMintData = (
+            await getMint(context.banksClient, virtualPoolState.baseMint)
+        );
+        expect(baseMintData.freezeAuthority.toString()).eq(PublicKey.default.toString())
+        expect(baseMintData.mintAuthorityOption).eq(0)
     });
 
     it("Swap", async () => {
@@ -164,29 +185,140 @@ describe("Migrate to damm v2", () => {
             referralTokenAccount: null,
         };
         await swap(context.banksClient, program, params);
+
+
     });
 
-    it("Create meteora damm v2 metadata", async () => {
-        await createMeteoraDammV2Metadata(context.banksClient, program, {
+    it("Create meteora metadata", async () => {
+        await createMeteoraMetadata(context.banksClient, program, {
             payer: admin,
             virtualPool,
             config,
         });
     });
 
-    it("Migrate to Meteora Damm V2 Pool", async () => {
+    it("Migrate to Meteora Damm Pool", async () => {
         const poolAuthority = derivePoolAuthority();
-        dammConfig = await createDammV2Config(
+        dammConfig = await createDammConfig(
             context.banksClient,
             admin,
             poolAuthority
         );
-        const migrationParams: MigrateMeteoraDammV2Params = {
+        const migrationParams: MigrateMeteoraParams = {
             payer: admin,
             virtualPool,
             dammConfig,
         };
 
-        await migrateToDammV2(context.banksClient, program, migrationParams);
+        await migrateToMeteoraDamm(context.banksClient, program, migrationParams);
+
+        // validate mint authority
+        const baseMintData = (
+            await getMint(context.banksClient, virtualPoolState.baseMint)
+        );
+        expect(baseMintData.mintAuthorityOption).eq(0)
+    });
+
+    it("Partner lock LP", async () => {
+        await lockLpForPartnerDamm(context.banksClient, program, {
+            payer: partner,
+            dammConfig,
+            virtualPool,
+        });
+    });
+
+    it("Creator lock LP", async () => {
+        await lockLpForCreatorDamm(context.banksClient, program, {
+            payer: poolCreator,
+            dammConfig,
+            virtualPool,
+        });
+    });
+
+    it("Partner withdraw surplus", async () => {
+        // partner withdraw surplus
+        await partnerWithdrawSurplus(context.banksClient, program, {
+            feeClaimer: partner,
+            virtualPool,
+        });
+    });
+
+
+    it("Creator withdraw surplus", async () => {
+        // partner withdraw surplus
+        await creatorWithdrawSurplus(context.banksClient, program, {
+            creator: poolCreator,
+            virtualPool,
+        });
+    });
+
+    it("Creator can not withdraw surplus again", async () => {
+        try {
+            await creatorWithdrawSurplus(context.banksClient, program, {
+                creator: poolCreator,
+                virtualPool,
+            });
+            assert.ok(false);
+        } catch (e) {
+            //
+        }
+    });
+
+
+    it("Parner can not withdraw surplus again", async () => {
+        try {
+            await partnerWithdrawSurplus(context.banksClient, program, {
+                feeClaimer: partner,
+                virtualPool,
+            });
+            assert.ok(false);
+        } catch (e) {
+            //
+        }
+    });
+    it("Protocol withdraw surplus", async () => {
+        await protocolWithdrawSurplus(context.banksClient, program, {
+            operator: operator,
+            virtualPool,
+        });
+    });
+
+    it("Protocol can not withdraw surplus again", async () => {
+        try {
+            await protocolWithdrawSurplus(context.banksClient, program, {
+                operator: operator,
+                virtualPool,
+            });
+            assert.ok(false);
+        } catch (e) {
+            //
+        }
+    });
+
+    it("Creator claim trading fee", async () => {
+        const claimTradingFeeParams: ClaimCreatorTradeFeeParams = {
+            creator: poolCreator,
+            pool: virtualPool,
+            maxBaseAmount: new BN(U64_MAX),
+            maxQuoteAmount: new BN(U64_MAX),
+        };
+        await claimCreatorTradingFee(context.banksClient, program, claimTradingFeeParams);
+    });
+
+    it("Partner claim trading fee", async () => {
+        const claimTradingFeeParams: ClaimTradeFeeParams = {
+            feeClaimer: partner,
+            pool: virtualPool,
+            maxBaseAmount: new BN(U64_MAX),
+            maxQuoteAmount: new BN(U64_MAX),
+        };
+        await claimTradingFee(context.banksClient, program, claimTradingFeeParams);
+    });
+
+    it("Operator claim protocol fee", async () => {
+        await claimProtocolFee(context.banksClient, program, {
+            pool: virtualPool,
+            operator: operator,
+        });
     });
 });
