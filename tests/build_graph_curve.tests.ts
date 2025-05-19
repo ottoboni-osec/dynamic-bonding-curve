@@ -250,7 +250,7 @@ describe("Build graph curve", () => {
     });
 
 
-    it.only("Graph curve with first buy", async () => {
+    it("Graph curve with first buy", async () => {
         let totalTokenSupply = 1_000_000_000; // 1 billion
         let initialMarketcap = 15; // 15 SOL;
         let migrationMarketcap = 255; // 255 SOL;        
