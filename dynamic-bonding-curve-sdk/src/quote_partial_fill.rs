@@ -5,13 +5,14 @@ use dynamic_bonding_curve::{
     state::{fee::FeeMode, PoolConfig, SwapResult, VirtualPool},
 };
 
-pub fn quote_exact_out(
+pub fn quote_partial_fill(
     pool: &VirtualPool,
     config: &PoolConfig,
     swap_base_for_quote: bool,
     current_timestamp: u64,
     current_slot: u64,
-    out_amount: u64,
+    in_amount: u64,
+    has_referral: bool,
 ) -> Result<SwapResult> {
     let mut pool = *pool;
 
@@ -20,7 +21,7 @@ pub fn quote_exact_out(
         "virtual pool is completed"
     );
 
-    ensure!(out_amount > 0, "amount is zero");
+    ensure!(in_amount > 0, "amount is zero");
 
     pool.update_pre_swap(config, current_timestamp)?;
     let activation_type =
@@ -35,16 +36,15 @@ pub fn quote_exact_out(
     } else {
         TradeDirection::QuoteToBase
     };
+    let fee_mode = &FeeMode::get_fee_mode(config.collect_fee_mode, trade_direction, has_referral)?;
 
-    let fee_mode = &FeeMode::get_fee_mode(config.collect_fee_mode, trade_direction, false)?;
-
-    let swap_result = pool.get_swap_result_from_exact_output(
+    let swap_result = pool.get_swap_result_from_partial_input(
         config,
-        out_amount,
+        in_amount,
         fee_mode,
         trade_direction,
         current_point,
     )?;
 
-    Ok(swap_result)
+    Ok(swap_result.get_swap_result())
 }
